@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>School Management System</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>" />
+</head>
+<body>
+  <!-- Boot splash: fades out automatically after ~1.3s via CSS animation -->
+  <div id="boot-loader">
+    <div class="boot-mark">SMS</div>
+    <div class="boot-dots"><span></span><span></span><span></span></div>
+  </div>
+
+  <!-- ============ AUTH (login / setup) ============ -->
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-bg"></div>
+    <div class="orb-field"><span></span><span></span><span></span></div>
+    <div class="auth-card" id="auth-card">
+      <!-- content injected by app.js -->
+    </div>
+    <div class="auth-footer">School Management System · Secure · Role-Based</div>
+  </div>
+
+  <!-- ============ MAIN APP ============ -->
+  <div id="main-screen" class="app-shell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">SMS</div>
+        <div class="brand-text"><b id="brand-name">School</b><span id="brand-role">Role</span></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot">
+        <div class="user-chip">
+          <div class="avatar" id="user-avatar">U</div>
+          <div><b id="user-name">User</b><small id="user-role">role</small></div>
+        </div>
+        <button class="btn btn-ghost btn-sm btn-block" id="btn-logout">Logout</button>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="hamburger" id="btn-menu">&#9776;</button>
+        <div class="topbar-title" id="page-title">Dashboard</div>
+      </header>
+      <main class="content" id="content"></main>
+    </div>
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <div id="modal-root"></div>
+
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/nav.js"></script>
+  <script src="/static/js/dashboard.js"></script>
+  <script src="/static/js/students.js"></script>
+  <script src="/static/js/parents.js"></script>
+  <script src="/static/js/teachers.js"></script>
+  <script src="/static/js/classes.js"></script>
+  <script src="/static/js/subjects.js"></script>
+  <script src="/static/js/student_attendance.js"></script>
+  <script src="/static/js/teacher_attendance.js"></script>
+  <script src="/static/js/exams.js"></script>
+  <script src="/static/js/promotions.js"></script>
+  <script src="/static/js/fees.js"></script>
+  <script src="/static/js/reports.js"></script>
+  <script src="/static/js/audit.js"></script>
+  <script src="/static/js/backup.js"></script>
+  <script src="/static/js/settings.js"></script>
+  <script src="/static/js/parent_portal.js"></script>
+</body>
+</html>
