@@ -40,7 +40,7 @@ def create_subject(body: SubjectCreate, session: dict = Depends(require_role("su
 
     conn = get_conn()
     try:
-        existing = conn.execute("SELECT id FROM subjects WHERE name=?", (name,)).fetchone()
+        existing = conn.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
         if existing:
             return json_err("This subject already exists", 400)
 
@@ -60,8 +60,18 @@ def update_subject(sid: str, body: SubjectUpdate, session: dict = Depends(requir
         existing = conn.execute("SELECT * FROM subjects WHERE id=?", (sid,)).fetchone()
         if not existing:
             return json_err("Subject not found", 404)
-        if body.name:
-            conn.execute("UPDATE subjects SET name=? WHERE id=?", (body.name.strip(), sid))
+
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                return json_err("Subject name cannot be empty", 400)
+
+            dup = conn.execute("SELECT id FROM subjects WHERE LOWER(name)=LOWER(?) AND id!=?",
+                                (name, sid)).fetchone()
+            if dup:
+                return json_err("Another subject already uses this name", 400)
+
+            conn.execute("UPDATE subjects SET name=? WHERE id=?", (name, sid))
             audit(session, "Subjects", "Update", f"Updated subject {sid}", conn=conn)
             conn.commit()
         return {"message": "Subject updated"}
@@ -77,10 +87,16 @@ def delete_subject(sid: str, session: dict = Depends(require_role("super_admin")
         if not existing:
             return json_err("Subject not found", 404)
 
-        in_use = conn.execute(
-            "SELECT COUNT(*) c FROM teacher_assignments WHERE subject_id=?", (sid,)).fetchone()["c"]
-        if in_use:
+        counts = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM teacher_assignments WHERE subject_id=:sid) AS assignments,
+                (SELECT COUNT(*) FROM results WHERE subject_id=:sid) AS results
+        """, {"sid": sid}).fetchone()
+
+        if counts["assignments"]:
             return json_err("Cannot delete a subject that is assigned to teachers", 400)
+        if counts["results"]:
+            return json_err("Cannot delete a subject that has recorded exam results", 400)
 
         conn.execute("DELETE FROM subjects WHERE id=?", (sid,))
         audit(session, "Subjects", "Delete", f"Removed subject {sid}", conn=conn)

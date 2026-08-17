@@ -61,10 +61,14 @@ function bindSubjectTable(content, rows, canWrite){
 
   content.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click', ()=>{
     const r = rows.find(x=>x.id===b.dataset.del);
-    confirmDialog('Delete subject', `Remove "${r?r.name:'this subject'}"? Blocked if it's assigned to any teacher.`, async()=>{
-      await api('/api/subjects/'+b.dataset.del, 'DELETE');
-      toast('Deleted','Subject removed','success');
-      PAGES.subjects.render();
+    confirmDialog('Remove assignment', `Unassign ${r?r.teacher_name:'this teacher'} from ${r?r.class_name+' / '+r.subject_name:'this class/subject'}?`, async()=>{
+      const result = await api('/api/assignments/'+b.dataset.del, 'DELETE');
+      if(result.warning){
+        toast('Removed (with a note)', result.warning, 'error');
+      } else {
+        toast('Removed','Assignment removed','success');
+      }
+      PAGES.assignments.render();
     });
   }));
 }

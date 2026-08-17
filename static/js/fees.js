@@ -70,8 +70,12 @@ function bindFeeStructTable(content, rows, canWrite, classes){
   content.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click', ()=>{
     const r = rows.find(x=>x.id===b.dataset.del);
     confirmDialog('Delete fee structure', `Remove the fee structure for ${r?r.class_name:'this class'}? Future challans won't auto-generate for this class until a new one is added.`, async()=>{
-      await api('/api/fee-structures/'+b.dataset.del, 'DELETE');
-      toast('Deleted','Fee structure removed','success');
+      const result = await api('/api/fee-structures/'+b.dataset.del, 'DELETE');
+      if(result.warning){
+        toast('Removed (with a note)', result.warning, 'error');
+      } else {
+        toast('Deleted','Fee structure removed','success');
+      }
       PAGES.feestruct.render();
     });
   }));
@@ -237,8 +241,12 @@ function openManualChargeModal(chid, challan, onDone){
       const v = getVals(scope);
       const amount = parseFloat(v.amount);
       if(isNaN(amount) || amount <= 0) throw new Error('Enter a valid amount greater than zero');
-      await api('/api/fees/challan/'+chid+'/manual','POST', {charge_type:v.charge_type, description:v.description, amount});
-      toast('Added','Charge added','success');
+      const result = await api('/api/fees/challan/'+chid+'/manual','POST', {charge_type:v.charge_type, description:v.description, amount});
+      if(result.note){
+        toast('Charge added — status updated', result.note, 'error');
+      } else {
+        toast('Added','Charge added','success');
+      }
       onDone();
     }
   });
@@ -246,16 +254,33 @@ function openManualChargeModal(chid, challan, onDone){
 
 function openPayModal(chid, challan, onDone){
   const context = challan
-    ? `<p class="hint" style="margin-bottom:14px"><b>${esc(challan.student_name)}</b> — ${monthName(challan.month)} ${challan.year} — Amount: ${money(challan.total)} — Currently: ${challan.status}</p>`
+    ? `<p class="hint" style="margin-bottom:14px"><b>${esc(challan.student_name)}</b> — ${monthName(challan.month)} ${challan.year} — Total: ${money(challan.total)} — Currently: ${challan.status} (Rs. ${challan.amount_paid||0} paid so far)</p>`
     : '';
-  const body = context + selectField('status','New Status', [{value:'Paid',label:'Paid'},{value:'Unpaid',label:'Unpaid'},{value:'Partially Paid',label:'Partially Paid'}], challan?challan.status:'Paid');
-  openModal({
+  const body = context
+    + selectField('status','New Status', [{value:'Paid',label:'Paid'},{value:'Unpaid',label:'Unpaid'},{value:'Partially Paid',label:'Partially Paid'}], challan?challan.status:'Paid')
+    + `<div class="field" id="partial-amount-wrap" style="${challan && challan.status==='Partially Paid' ? '' : 'display:none'}">
+         <label>Amount Paid</label>
+         <input class="input" name="amount_paid" type="number" min="0" value="${challan?challan.amount_paid||'':''}">
+       </div>`;
+  const overlay = openModal({
     title: 'Update Payment', body,
     onSave: async(scope)=>{
       const v = getVals(scope);
-      await api('/api/fees/challan/'+chid+'/pay','POST', v);
+      const payload = { status: v.status };
+      if(v.status === 'Partially Paid'){
+        const amt = parseFloat(v.amount_paid);
+        if(isNaN(amt) || amt <= 0) throw new Error('Enter a valid amount paid for a partial payment');
+        payload.amount_paid = amt;
+      }
+      const result = await api('/api/fees/challan/'+chid+'/pay','POST', payload);
       toast('Updated','Payment status set','success');
       onDone();
     }
+  });
+
+  const statusSel = overlay.querySelector('[name="status"]');
+  const partialWrap = overlay.querySelector('#partial-amount-wrap');
+  statusSel.addEventListener('change', ()=>{
+    partialWrap.style.display = statusSel.value === 'Partially Paid' ? '' : 'none';
   });
 }

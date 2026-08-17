@@ -1,6 +1,10 @@
 'use strict';
 
-function renderAuthShell(inner){ document.getElementById('auth-card').innerHTML=inner; }
+function renderAuthShell({title, sub, body}){
+  document.getElementById('auth-card').innerHTML = `
+    <div class="auth-card-head"><h1>${esc(title)}</h1><div class="sub">${esc(sub)}</div></div>
+    <div class="auth-card-body">${body}</div>`;
+}
 
 /* Reusable password field with a show/hide toggle. Self-contained inline
    styling so it doesn't require any CSS file changes. */
@@ -46,10 +50,9 @@ function renderLogin(){
   }
 
   function draw(){
-    renderAuthShell(`
-      <div class="auth-logo">SMS</div>
-      <h1>Welcome back</h1>
-      <div class="sub">Sign in to the School Management System</div>
+    renderAuthShell({
+      title: 'Welcome Back', sub: 'Sign in to access your dashboard',
+      body: `
       <div class="tabs">
         <button class="${tab==='admin'?'active':''}" data-tab="admin" type="button" ${submitting?'disabled':''}>Staff Login</button>
         <button class="${tab==='parent'?'active':''}" data-tab="parent" type="button" ${submitting?'disabled':''}>Parent Login</button>
@@ -64,7 +67,7 @@ function renderLogin(){
         </button>
       </form>
       <p class="hint" style="margin-top:14px;text-align:center">Secure, role-based access · your session is encrypted.</p>
-    `);
+    `});
 
     const emailInput = document.querySelector('#login-form input[name="email"]');
     if(emailInput) emailInput.setAttribute('autocomplete','username');
@@ -153,10 +156,9 @@ function renderSetup(){
   }
 
   function draw(){
-    renderAuthShell(`
-      <div class="auth-logo">SMS</div>
-      <h1>School Setup</h1>
-      <div class="sub">Configure your institution (one-time wizard)</div>
+    renderAuthShell({
+      title: 'School Setup', sub: 'Configure your institution (one-time wizard)',
+      body: `
       <form id="setup-form" novalidate>
         ${field('school_name','School Name','', 'text','Bright Future School')}
         <div class="row2">${field('emis_code','EMIS Code','', 'text','EMIS-000')+field('contact_number','Contact','', 'text','+92-...')}</div>
@@ -168,12 +170,12 @@ function renderSetup(){
         <div id="class-list" style="margin-top:10px">${classBlock()}</div>
         <div class="divider"></div>
         <b>Administrator Account</b>
-        <div class="row2" style="margin-top:8px">${field('admin_email','Admin Email','', 'email','admin@school.edu')}${passwordField('admin_password','Admin Password','min 6 chars')}</div>
+        <div class="row2" style="margin-top:8px">${field('admin_email','Admin Email','', 'email','admin@school.edu')}${passwordField('admin_password','Admin Password','min 8 characters')}</div>
         <div class="error-text" id="setup-error" hidden></div>
         <button class="btn btn-primary btn-block" type="submit" style="margin-top:14px" ${submitting?'disabled':''}>
           ${submitting ? 'Setting up…' : 'Complete Setup'}
         </button>
-      </form>`);
+      </form>`});
 
     const adminEmail = document.querySelector('#setup-form input[name="admin_email"]');
     if(adminEmail) adminEmail.setAttribute('autocomplete','username');
@@ -209,8 +211,8 @@ function renderSetup(){
       if(!v.admin_email || !EMAIL_RE.test(v.admin_email)){
         errEl.textContent = 'Enter a valid administrator email.'; errEl.hidden=false; return;
       }
-      if(!v.admin_password || v.admin_password.length < 6){
-        errEl.textContent = 'Admin password must be at least 6 characters.'; errEl.hidden=false; return;
+      if(!v.admin_password || v.admin_password.length < 8){
+        errEl.textContent = 'Admin password must be at least 8 characters.'; errEl.hidden=false; return;
       }
 
       const cls=[];
@@ -264,20 +266,59 @@ async function afterLogin(){
   }catch(e){
     console.warn('Could not load school info after login:', e.message);
   }
-  showApp();
+  await showApp();
 }
 
-function showApp(){
+async function showApp(){
   document.getElementById('auth-screen').hidden=true;
   document.getElementById('main-screen').hidden=false;
   const u=state.user;
   document.getElementById('user-name').textContent=u.name||u.role;
   document.getElementById('user-role').textContent=(u.role||'').replace('_',' ');
   document.getElementById('user-avatar').textContent=(u.name||'U').charAt(0).toUpperCase();
-  refreshBrand();
+  await refreshBrand(true); // force a fresh fetch on every login, ignoring any stale cached name
   document.getElementById('brand-role').textContent=(u.role||'').replace('_',' ');
   buildNav();
   go('dashboard');
 }
 
 document.getElementById('btn-logout').addEventListener('click',()=>logout());
+
+document.getElementById('sidebar').addEventListener('click', (e)=>{
+  const chip = e.target.closest('.user-chip');
+  if(!chip) return;
+  openProfileModal();
+});
+
+async function openProfileModal(){
+  let profile;
+  try{ profile = await api('/api/settings/profile'); }
+  catch(err){ toast('Error', "Couldn't load your profile: " + err.message, 'error'); return; }
+
+  openModal({
+    title: 'My Profile', wide:false,
+    body: `
+      ${field('display_name','Your Name', profile.display_name||'', 'text')}
+      <p class="hint" style="margin-bottom:6px">Email: ${esc(profile.email)} (contact Super Admin to change)</p>
+      <div class="divider"></div>
+      ${passwordField('password','New Password (leave blank to keep current)')}
+    `,
+    onSave: async(scope)=>{
+      const v = getVals(scope);
+      const payload = {};
+      if(v.display_name && v.display_name !== profile.display_name) payload.display_name = v.display_name;
+      if(v.password) payload.password = v.password;
+      if(!Object.keys(payload).length){ toast('Nothing changed', 'No changes to save', 'error'); return; }
+
+      await api('/api/settings/profile','PUT', payload);
+      toast('Updated', 'Your profile has been updated', 'success');
+
+      if(payload.display_name){
+        const me = await api('/api/auth/me');
+        state.user = me;
+        document.getElementById('user-name').textContent = me.name || me.role;
+      }
+    }
+  });
+  wirePasswordToggles(document.getElementById('modal-root'));
+}

@@ -16,28 +16,38 @@ def dashboard(session: dict = Depends(require_session)):
         out = {"role": role, "school": get_school(conn), "name": session.get("name")}
 
         if role == "super_admin":
-            # FR-3.2: totals + today's attendance + pending fees
+            # FR-3.2: totals + today's attendance + pending fees.
+            # One round-trip instead of five separate COUNT(*) queries.
+            row = conn.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM students WHERE status='active') AS students,
+                    (SELECT COUNT(*) FROM teachers) AS teachers,
+                    (SELECT COUNT(*) FROM classes) AS classes,
+                    (SELECT COUNT(*) FROM parents) AS parents,
+                    (SELECT COUNT(*) FROM fee_challans WHERE status!='Paid') AS pending_fees,
+                    (SELECT COUNT(*) FROM student_attendance WHERE date=:today AND status='Present') AS present_today
+            """, {"today": today()}).fetchone()
+
             out["stats"] = {
-                "students": conn.execute("SELECT COUNT(*) c FROM students WHERE status='active'").fetchone()["c"],
-                "teachers": conn.execute("SELECT COUNT(*) c FROM teachers").fetchone()["c"],
-                "classes": conn.execute("SELECT COUNT(*) c FROM classes").fetchone()["c"],
-                "parents": conn.execute("SELECT COUNT(*) c FROM parents").fetchone()["c"],
-                "pending_fees": conn.execute(
-                    "SELECT COUNT(*) c FROM fee_challans WHERE status!='Paid'").fetchone()["c"],
+                "students": row["students"], "teachers": row["teachers"],
+                "classes": row["classes"], "parents": row["parents"],
+                "pending_fees": row["pending_fees"],
             }
-            present = conn.execute(
-                "SELECT COUNT(*) c FROM student_attendance WHERE date=? AND status='Present'",
-                (today(),)).fetchone()["c"]
-            total = conn.execute("SELECT COUNT(*) c FROM students WHERE status='active'").fetchone()["c"]
-            out["today_attendance"] = {"present": present, "total": total}
+            out["today_attendance"] = {"present": row["present_today"], "total": row["students"]}
 
         elif role == "principal":
             # FR-3.3
-            out["teacher_attendance_today"] = conn.execute(
-                "SELECT COUNT(*) c FROM teacher_attendance WHERE date=?", (today(),)).fetchone()["c"]
-            out["students"] = conn.execute("SELECT COUNT(*) c FROM students WHERE status='active'").fetchone()["c"]
-            out["exams"] = conn.execute("SELECT COUNT(*) c FROM examinations").fetchone()["c"]
-            out["classes"] = conn.execute("SELECT COUNT(*) c FROM classes").fetchone()["c"]
+            row = conn.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM teacher_attendance WHERE date=:today) AS tatt,
+                    (SELECT COUNT(*) FROM students WHERE status='active') AS students,
+                    (SELECT COUNT(*) FROM examinations) AS exams,
+                    (SELECT COUNT(*) FROM classes) AS classes
+            """, {"today": today()}).fetchone()
+            out["teacher_attendance_today"] = row["tatt"]
+            out["students"] = row["students"]
+            out["exams"] = row["exams"]
+            out["classes"] = row["classes"]
 
         elif role == "teacher":
             # FR-3.4: assigned subjects/classes + exam tasks
@@ -53,19 +63,27 @@ def dashboard(session: dict = Depends(require_session)):
             else:
                 out["assignments"] = []
                 out["exams"] = []
+                out["profile_missing"] = True  # teacher user exists but has no linked teacher profile row
 
         elif role == "class_incharge":
             # FR-3.5: assigned class, student list count, daily attendance
             t = conn.execute("SELECT * FROM teachers WHERE user_id=?", (session["uid"],)).fetchone()
             class_id = t["class_id"] if t else None
             out["class_id"] = class_id
-            out["students"] = conn.execute(
-                "SELECT COUNT(*) c FROM students WHERE class_id=?", (class_id,)).fetchone()["c"] if class_id else 0
-            present = conn.execute(
-                "SELECT COUNT(*) c FROM student_attendance sa JOIN students s ON sa.student_id=s.id "
-                "WHERE sa.date=? AND sa.status='Present' AND s.class_id=?",
-                (today(), class_id)).fetchone()["c"] if class_id else 0
-            out["today_attendance"] = {"present": present, "total": out["students"]}
+            out["needs_setup"] = class_id is None  # flag: not yet assigned to a class
+
+            if class_id:
+                row = conn.execute("""
+                    SELECT
+                        (SELECT COUNT(*) FROM students WHERE class_id=:cid) AS students,
+                        (SELECT COUNT(*) FROM student_attendance sa JOIN students s ON sa.student_id=s.id
+                         WHERE sa.date=:today AND sa.status='Present' AND s.class_id=:cid) AS present
+                """, {"cid": class_id, "today": today()}).fetchone()
+                out["students"] = row["students"]
+                out["today_attendance"] = {"present": row["present"], "total": row["students"]}
+            else:
+                out["students"] = 0
+                out["today_attendance"] = {"present": 0, "total": 0}
 
         elif role == "parent":
             # FR-3.6
@@ -75,12 +93,24 @@ def dashboard(session: dict = Depends(require_session)):
                 "LEFT JOIN classes c ON s.class_id=c.id LEFT JOIN sections sec ON s.section_id=sec.id "
                 "WHERE s.id=?", (sid,)).fetchone()
             out["student"] = dict(stu) if stu else None
-            out["attendance"] = [dict(r) for r in conn.execute(
-                "SELECT * FROM student_attendance WHERE student_id=? ORDER BY date DESC LIMIT 10",
-                (sid,)).fetchall()]
-            out["fees"] = [dict(r) for r in conn.execute(
-                "SELECT * FROM fee_challans WHERE student_id=? ORDER BY year DESC, month DESC",
-                (sid,)).fetchall()]
+            out["no_student_linked"] = stu is None
+
+            if stu:
+                out["attendance"] = [dict(r) for r in conn.execute(
+                    "SELECT * FROM student_attendance WHERE student_id=? ORDER BY date DESC LIMIT 10",
+                    (sid,)).fetchall()]
+                out["fees"] = [dict(r) for r in conn.execute(
+                    "SELECT * FROM fee_challans WHERE student_id=? ORDER BY year DESC, month DESC",
+                    (sid,)).fetchall()]
+            else:
+                out["attendance"] = []
+                out["fees"] = []
+
+        else:
+            # Unrecognized role (e.g. a role the dashboard hasn't been taught
+            # to render yet) — return something explicit rather than a
+            # silently near-empty payload.
+            out["unsupported_role"] = True
 
         return out
     finally:

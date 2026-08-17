@@ -33,7 +33,16 @@ class PromoteRequest(BaseModel):
 
 def _is_eligible(conn, student_id: str, class_id: str) -> bool:
     """True if the student's most recent exam for this class has no Fail results.
-    A student with no exam results at all is treated as eligible (nothing to fail)."""
+    A student with no exam results at all is treated as eligible (nothing to fail).
+
+    NOTE: "most recent" is determined by exam_date, which is an optional,
+    freely-editable text field with no enforced format (see examinations.py).
+    If exam_date values are missing or inconsistently formatted across exams
+    for the same class, this ordering may not reflect true chronological
+    order. This is a known limitation worth addressing by making exam_date
+    a properly validated/required date field — flagging for a future pass
+    rather than silently working around it here.
+    """
     latest_exam = conn.execute(
         "SELECT id FROM examinations WHERE class_id=? "
         "AND id IN (SELECT DISTINCT exam_id FROM results WHERE student_id=?) "
@@ -54,37 +63,60 @@ def promote(body: PromoteRequest, session: dict = Depends(require_role("super_ad
     year = body.academic_year or str(datetime.date.today().year)
     conn = get_conn()
     try:
-        promoted, retained = 0, 0
-        for item in body.promotions:
-            stu = conn.execute("SELECT * FROM students WHERE id=?", (item.student_id,)).fetchone()
-            if not stu:
-                continue
+        # Validate everything up front, before writing anything.
+        student_ids = [item.student_id for item in body.promotions]
+        class_ids = [item.to_class_id for item in body.promotions]
 
-            eligible = _is_eligible(conn, item.student_id, stu["class_id"])
-            will_promote = eligible or item.override
+        existing_students = {r["id"]: r for r in conn.execute(
+            f"SELECT * FROM students WHERE id IN ({','.join('?' * len(student_ids))})",
+            student_ids).fetchall()}
+        missing_students = set(student_ids) - set(existing_students.keys())
+        if missing_students:
+            return json_err(f"{len(missing_students)} student(s) in this request could not be found.", 400)
 
-            from_class = stu["class_id"]
-            to_class = item.to_class_id if will_promote else from_class
-            status = "Promoted" if will_promote else "Retained"
+        existing_classes = {r["id"] for r in conn.execute(
+            f"SELECT id FROM classes WHERE id IN ({','.join('?' * len(class_ids))})",
+            class_ids).fetchall()}
+        missing_classes = set(class_ids) - existing_classes
+        if missing_classes:
+            return json_err(f"{len(missing_classes)} target class(es) in this request could not be found.", 400)
 
-            if will_promote:
-                conn.execute("UPDATE students SET class_id=? WHERE id=?", (to_class, item.student_id))
-                promoted += 1
-            else:
-                retained += 1
+        # BEGIN IMMEDIATE + explicit commit/rollback so a batch either fully
+        # applies or not at all — no half-promoted state on a mid-batch error.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            promoted, retained = 0, 0
+            for item in body.promotions:
+                stu = existing_students[item.student_id]
 
-            conn.execute(
-                "INSERT INTO promotions (id, student_id, from_class, to_class, academic_year, "
-                "status, promoted_by, promoted_at) VALUES (?,?,?,?,?,?,?,?)",
-                (new_id("prm"), item.student_id, from_class, to_class, year, status,
-                 session.get("uid"), now_iso()))
+                eligible = _is_eligible(conn, item.student_id, stu["class_id"])
+                will_promote = eligible or item.override
 
-        audit(session, "Promotion", "Promote",
-              f"Processed {len(body.promotions)} students for {year}: "
-              f"{promoted} promoted, {retained} retained", conn=conn)
-        conn.commit()
-        return {"message": f"{promoted} promoted, {retained} retained",
-                "promoted": promoted, "retained": retained}
+                from_class = stu["class_id"]
+                to_class = item.to_class_id if will_promote else from_class
+                status = "Promoted" if will_promote else "Retained"
+
+                if will_promote:
+                    conn.execute("UPDATE students SET class_id=? WHERE id=?", (to_class, item.student_id))
+                    promoted += 1
+                else:
+                    retained += 1
+
+                conn.execute(
+                    "INSERT INTO promotions (id, student_id, from_class, to_class, academic_year, "
+                    "status, promoted_by, promoted_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (new_id("prm"), item.student_id, from_class, to_class, year, status,
+                     session.get("uid"), now_iso()))
+
+            audit(session, "Promotion", "Promote",
+                  f"Processed {len(body.promotions)} students for {year}: "
+                  f"{promoted} promoted, {retained} retained", conn=conn)
+            conn.commit()
+            return {"message": f"{promoted} promoted, {retained} retained",
+                    "promoted": promoted, "retained": retained}
+        except Exception:
+            conn.rollback()
+            raise
     finally:
         conn.close()
 

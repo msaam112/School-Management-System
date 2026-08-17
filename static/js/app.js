@@ -128,10 +128,29 @@ function toast(title, msg, type='info'){
 function loading(){
   document.getElementById('content').innerHTML='<div class="loading"><div class="spinner"></div></div>';
 }
-function refreshBrand(){
+async function refreshBrand(forceRefetch=false){
+  // Always prefer a genuinely fresh school name over whatever's cached in
+  // state — the login response's "name" field is the PERSON's display
+  // name, not the school's name, and must never be used here.
+  if(forceRefetch || !state.school || !state.school.name){
+    try{
+      const d = await api('/api/settings');
+      state.school = d.school || state.school || {};
+    }catch(e){ /* fall through to whatever we already have, if anything */ }
+  }
+
   const name = (state.school && state.school.name) || 'School';
   const brandEl = document.getElementById('brand-name');
   if(brandEl) brandEl.textContent = name;
+
+  const logoEl = document.getElementById('brand-logo-el');
+  if(logoEl){
+    if(state.school && state.school.logo){
+      logoEl.innerHTML = `<img src="${esc(state.school.logo)}" alt="Logo" style="width:100%;height:100%;object-fit:cover">`;
+    } else {
+      logoEl.textContent = 'SMS';
+    }
+  }
 }
 
 function startNavProgress(){

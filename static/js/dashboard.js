@@ -34,6 +34,17 @@ function dashboardSkeleton(){
     <div class="grid stats-grid">${card.repeat(4)}</div>`;
 }
 
+function infoBanner(text, tone='amber'){
+  const colors = {
+    amber: {bg:'rgba(255,171,0,.1)', border:'rgba(255,171,0,.35)', text:'#ffcb66'},
+    red: {bg:'rgba(252,90,90,.1)', border:'rgba(252,90,90,.35)', text:'#ff9498'},
+  };
+  const c = colors[tone] || colors.amber;
+  return `<div class="card" style="background:${c.bg};border-color:${c.border};color:${c.text};padding:14px 16px;margin-bottom:18px;font-size:13.5px">
+    ${esc(text)}
+  </div>`;
+}
+
 PAGES.dashboard = { title:'Dashboard', async render(){
   const c=document.getElementById('content');
   c.innerHTML = dashboardSkeleton();
@@ -46,13 +57,12 @@ PAGES.dashboard = { title:'Dashboard', async render(){
     return;
   }
   state.school=d.school||{};
-  refreshBrand();
+  await refreshBrand();
 
   const role=d.role;
   const stats = d.stats || {};
   const todayAtt = d.today_attendance || {};
 
-  // id lets us target each number for the count-up animation after insertion.
   let statId = 0;
   const stat=(v,l,col,animated=true)=>{
     const id = `stat-${statId++}`;
@@ -64,6 +74,7 @@ PAGES.dashboard = { title:'Dashboard', async render(){
 
   let cards='';
   let statusChip = '';
+  let banner = '';
 
   if(role==='super_admin'){
     cards = stat(stats.students ?? 0,'Students','#6d5efc')
@@ -72,37 +83,56 @@ PAGES.dashboard = { title:'Dashboard', async render(){
           + stat(stats.parents ?? 0,'Parents','#22c55e')
           + stat((todayAtt.present ?? 0)+'/'+(todayAtt.total ?? 0),'Present Today','#3b82f6', false)
           + stat(stats.pending_fees ?? 0,'Pending Fees','#ef4444');
+
   } else if(role==='principal'){
     cards = stat(d.students ?? 0,'Students','#6d5efc')
           + stat(d.teacher_attendance_today ?? 0,'Teacher Attendance Today','#22d3ee')
           + stat(d.exams ?? 0,'Exams','#f59e0b')
           + stat(d.classes ?? 0,'Classes','#22c55e');
+
   } else if(role==='teacher'){
+    if(d.profile_missing){
+      banner = infoBanner('Your account isn\'t linked to a teacher profile yet. Contact your Super Admin to get this set up.', 'amber');
+    }
     const assignments = d.assignments||[];
     cards = stat(assignments.length,'Subjects Assigned','#6d5efc')
           + stat(new Set(assignments.map(a=>a.class_id)).size,'Classes','#22d3ee')
           + stat((d.exams||[]).length,'Exams','#f59e0b');
+
   } else if(role==='class_incharge'){
+    if(d.needs_setup){
+      banner = infoBanner('You haven\'t been assigned as Class Incharge for any class yet. Contact your Super Admin.', 'amber');
+    }
     const present = todayAtt.present ?? null;
     const total = todayAtt.total ?? null;
     cards = stat(d.students ?? 0,'Students','#6d5efc')
           + stat((present!=null && total!=null) ? `${present}/${total}` : '-','Present Today','#22d3ee', false)
           + stat(d.class_id?'Yes':'No','Class Assigned','#22c55e', false);
-    if(present!=null && total!=null){
+    if(!d.needs_setup && present!=null && total!=null){
       statusChip = present === total && total > 0
         ? `<span class="badge green">🔥 Attendance fully marked today</span>`
         : `<span class="badge amber">⏳ Attendance pending for today</span>`;
     }
+
   } else if(role==='parent'){
+    if(d.no_student_linked){
+      banner = infoBanner('Your account isn\'t linked to a student record. Please contact the school office.', 'red');
+    }
     const s=d.student||{};
     const hasDue = (d.fees||[]).some(f=>f.status!=='Paid');
     cards = stat(s.name||'-','Child','#6d5efc', false)
           + stat(((s.class_name||'')+' '+(s.section_name||'')).trim()||'-','Class','#22d3ee', false)
           + stat(hasDue?'Due':'Clear','Fee Status','#f59e0b', false)
           + stat((d.attendance&&d.attendance[0])?d.attendance[0].status:'-','Last Attendance','#22c55e', false);
-    statusChip = hasDue
-      ? `<span class="badge red">A fee payment is currently due</span>`
-      : `<span class="badge green">✓ All fees up to date</span>`;
+    if(!d.no_student_linked){
+      statusChip = hasDue
+        ? `<span class="badge red">A fee payment is currently due</span>`
+        : `<span class="badge green">✓ All fees up to date</span>`;
+    }
+
+  } else if(d.unsupported_role){
+    banner = infoBanner('A dashboard view isn\'t available for your current role yet. Contact your Super Admin.', 'amber');
+    cards = '';
   } else {
     cards = `<div class="empty">No dashboard data is configured for this role yet.</div>`;
   }
@@ -110,15 +140,14 @@ PAGES.dashboard = { title:'Dashboard', async render(){
   const qa = quickActions(role);
 
   c.innerHTML=`
+    ${banner}
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:6px">
       <div style="color:var(--muted);font-size:15px">${greeting()}, <b style="color:var(--text)">${esc(d.name||'User')}</b> — here is your ${esc((role||'').replace('_',' '))} overview.</div>
       ${statusChip}
     </div>
-    <div class="grid stats-grid" style="margin-top:16px">${cards}</div>
+    ${cards ? `<div class="grid stats-grid" style="margin-top:16px">${cards}</div>` : ''}
     ${qa ? `<div class="panel"><div class="panel-head"><h3>Quick Actions</h3></div><div class="panel-body toolbar">${qa}</div></div>` : ''}`;
 
-  // Trigger the count-up animation for every numeric stat now that the
-  // elements are actually in the DOM.
   c.querySelectorAll('[data-animated="true"]').forEach(el=>{
     animateCount(el, el.dataset.target);
   });

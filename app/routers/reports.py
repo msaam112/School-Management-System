@@ -1,13 +1,16 @@
 """Reports — FR-15. Every report is downloadable as PDF; list endpoints
 support in-app viewing. Print is a browser-native action on the PDF."""
+import logging
 from fastapi import APIRouter, Depends, Response
 
 from app.db import get_conn, today
-from app.helpers import get_school, month_name
+from app.helpers import get_school, month_name, compute_grade
 from app.deps import require_role
 from app.main import json_err
 from app.pdf import build_generic_report, build_attendance_report, build_result_card, build_fee_challan
 from app.ai import generate_result_remark
+
+logger = logging.getLogger("sms.reports")
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -20,16 +23,23 @@ def _pdf(bytes_, filename):
                      headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+def _class_incharge_own_class(conn, session):
+    """Returns the Class Incharge's own class_id, or None if not applicable/assigned."""
+    if session["role"] != "class_incharge":
+        return None
+    t = conn.execute("SELECT class_id FROM teachers WHERE user_id=?", (session["uid"],)).fetchone()
+    return t["class_id"] if t else None
+
+
 # ------------------------------------------------------------------ Student Reports
 @router.get("/students/pdf")
 def student_list_pdf(class_id: str = None, session: dict = Depends(require_role(*WIDE_VIEW))):
     conn = get_conn()
     try:
         flt, params = "1=1", []
-        if session["role"] == "class_incharge":
-            t = conn.execute("SELECT class_id FROM teachers WHERE user_id=?", (session["uid"],)).fetchone()
-            if t and t["class_id"]:
-                flt, params = "s.class_id=?", [t["class_id"]]
+        own_class = _class_incharge_own_class(conn, session)
+        if own_class:
+            flt, params = "s.class_id=?", [own_class]
         if class_id:
             flt += " AND s.class_id=?"; params.append(class_id)
 
@@ -54,6 +64,8 @@ def student_profile_pdf(sid: str, session: dict = Depends(require_role(*WIDE_VIE
     try:
         if session["role"] == "parent" and session.get("student_id") != sid:
             return json_err("Access denied", 403)
+
+        own_class = _class_incharge_own_class(conn, session)
         row = conn.execute(
             "SELECT s.*, c.name class_name, sec.name section_name, p.name parent_name, p.phone parent_phone "
             "FROM students s LEFT JOIN classes c ON s.class_id=c.id "
@@ -61,6 +73,8 @@ def student_profile_pdf(sid: str, session: dict = Depends(require_role(*WIDE_VIE
             "WHERE s.id=?", (sid,)).fetchone()
         if not row:
             return json_err("Student not found", 404)
+        if own_class and row["class_id"] != own_class:
+            return json_err("Access denied — this student is not in your class", 403)
 
         data = [[k, v] for k, v in [
             ("Admission ID", row["admission_id"]), ("Roll Number", row["roll_number"]),
@@ -82,6 +96,11 @@ def result_report_pdf(exam_id: str, session: dict = Depends(require_role(*WIDE_V
         exam = conn.execute("SELECT * FROM examinations WHERE id=?", (exam_id,)).fetchone()
         if not exam:
             return json_err("Exam not found", 404)
+
+        own_class = _class_incharge_own_class(conn, session)
+        if own_class and exam["class_id"] != own_class:
+            return json_err("Access denied — this exam is not for your class", 403)
+
         rows = conn.execute(
             "SELECT st.roll_number, st.name, s.name subject_name, r.obtained, r.percentage, r.grade, r.pass_fail "
             "FROM results r JOIN students st ON r.student_id=st.id JOIN subjects s ON r.subject_id=s.id "
@@ -155,6 +174,10 @@ def student_attendance_pdf(class_id: str, section_id: str = None, date: str = No
                             session: dict = Depends(require_role(*WIDE_VIEW))):
     conn = get_conn()
     try:
+        own_class = _class_incharge_own_class(conn, session)
+        if own_class and class_id != own_class:
+            return json_err("Access denied — you may only view attendance for your own class", 403)
+
         d = date or today()
         cls = conn.execute("SELECT name FROM classes WHERE id=?", (class_id,)).fetchone()
         secn = conn.execute("SELECT name FROM sections WHERE id=?", (section_id,)).fetchone() if section_id else None
@@ -276,7 +299,8 @@ def _fee_status_report(status: str, title: str):
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT fc.month, fc.year, s.roll_number, s.name student_name, c.name class_name, fc.total "
+            "SELECT fc.month, fc.year, s.roll_number, s.name student_name, c.name class_name, "
+            "fc.total, fc.amount_paid "
             "FROM fee_challans fc JOIN students s ON fc.student_id=s.id "
             "LEFT JOIN classes c ON s.class_id=c.id WHERE fc.status=? ORDER BY fc.year, fc.month",
             (status,)).fetchall()
@@ -295,7 +319,7 @@ def monthly_collection_pdf(month: int = None, year: int = None,
     conn = get_conn()
     try:
         sql = ("SELECT fc.month, fc.year, SUM(fc.total) total, "
-               "SUM(CASE WHEN fc.status='Paid' THEN fc.total ELSE 0 END) collected, COUNT(*) count "
+               "SUM(fc.amount_paid) collected, COUNT(*) count "
                "FROM fee_challans fc WHERE 1=1")
         params = []
         if month: sql += " AND fc.month=?"; params.append(month)
@@ -303,7 +327,7 @@ def monthly_collection_pdf(month: int = None, year: int = None,
         sql += " GROUP BY fc.year, fc.month ORDER BY fc.year, fc.month"
         rows = conn.execute(sql, params).fetchall()
         data = [[month_name(r["month"]) + f" {r['year']}", r["count"], f"Rs. {r['total']:.0f}",
-                 f"Rs. {r['collected']:.0f}"] for r in rows]
+                 f"Rs. {r['collected'] or 0:.0f}"] for r in rows]
         pdf = build_generic_report(get_school(conn), "Monthly Collection Report", "",
                                     ["Month", "Challans", "Total Billed", "Collected"], data,
                                     [130, 90, 130, 130])
@@ -330,11 +354,17 @@ def fee_challan_pdf(chid: str, session: dict = Depends(require_role(*ADMIN_VIEW,
             "SELECT fs.* FROM students s JOIN fee_structures fs ON s.class_id=fs.class_id WHERE s.id=?",
             (ch["student_id"],)).fetchone()
 
+        # NOTE: this breakdown is a best-effort reconstruction from the
+        # CURRENT fee structure — it is informational, and may not exactly
+        # match the challan's stored `total` if manual charges were added,
+        # or if the fee structure changed after this challan was generated.
+        # The challan's stored `total` (and amount_paid) remain the actual
+        # source of truth.
         breakdown = []
         if fs:
             has_prev = conn.execute(
-                "SELECT COUNT(*) c FROM fee_challans WHERE student_id=? AND id!=?",
-                (ch["student_id"], chid)).fetchone()["c"]
+                "SELECT COUNT(*) c FROM fee_challans WHERE student_id=? AND id!=? AND issue_date<?",
+                (ch["student_id"], chid, ch["issue_date"])).fetchone()["c"]
             if has_prev == 0 and fs["admission_fee"]:
                 breakdown.append({"label": "Admission Fee", "amount": fs["admission_fee"]})
             breakdown.append({"label": "Tuition Fee", "amount": fs["tuition_fee"]})
@@ -352,7 +382,7 @@ def fee_challan_pdf(chid: str, session: dict = Depends(require_role(*ADMIN_VIEW,
         conn.close()
 
 
-# ------------------------------------------------------------------ Result Card (moved here from examinations for consistency)
+# ------------------------------------------------------------------ Result Card
 @router.get("/results/card/pdf")
 def result_card_pdf(student_id: str, exam_id: str,
                      session: dict = Depends(require_role(*WIDE_VIEW, "parent"))):
@@ -361,6 +391,8 @@ def result_card_pdf(student_id: str, exam_id: str,
 
     conn = get_conn()
     try:
+        own_class = _class_incharge_own_class(conn, session)
+
         student = conn.execute(
             "SELECT s.*, c.name class_name, sec.name section_name FROM students s "
             "LEFT JOIN classes c ON s.class_id=c.id LEFT JOIN sections sec ON s.section_id=sec.id "
@@ -368,6 +400,8 @@ def result_card_pdf(student_id: str, exam_id: str,
         exam = conn.execute("SELECT * FROM examinations WHERE id=?", (exam_id,)).fetchone()
         if not student or not exam:
             return json_err("Student or exam not found", 404)
+        if own_class and student["class_id"] != own_class:
+            return json_err("Access denied — this student is not in your class", 403)
 
         rows = conn.execute(
             "SELECT r.*, s.name subject_name FROM results r JOIN subjects s ON r.subject_id=s.id "
@@ -382,7 +416,6 @@ def result_card_pdf(student_id: str, exam_id: str,
         tot_tot = sum(r["total"] for r in rows) or 1
         pct = tot_obt / tot_tot * 100
         all_pass = all(r["pass_fail"] == "Pass" for r in rows)
-        from app.helpers import compute_grade
         totals = {"obtained": tot_obt, "total": tot_tot, "percentage": round(pct, 2),
                   "grade": compute_grade(pct), "pass_fail": "Pass" if all_pass else "Fail"}
 
@@ -390,6 +423,8 @@ def result_card_pdf(student_id: str, exam_id: str,
             totals["remark"] = generate_result_remark(student["name"], exam["name"], subject_rows,
                                                         totals["percentage"], totals["pass_fail"])
         except Exception:
+            logger.exception("AI remark generation failed for result card: student=%s exam=%s",
+                              student_id, exam_id)
             totals["remark"] = None  # AI is best-effort; PDF still generates without it
 
         pdf = build_result_card(get_school(conn), dict(student), dict(exam), subject_rows, totals)

@@ -1,21 +1,57 @@
 """Shared business helpers: grading, audit logging, school lookup."""
 import datetime
+import logging
+import secrets
 
 from app.config import GRADE_SCALE, DEFAULT_PASS_MARK, SYSTEM_USER_ID, SYSTEM_USER_NAME
 from app.db import get_conn
-import secrets
+
+logger = logging.getLogger("sms.helpers")
 
 
 def compute_grade(percentage) -> str:
-    percentage = float(percentage)
+    try:
+        percentage = float(percentage)
+    except (TypeError, ValueError):
+        logger.warning("compute_grade received a non-numeric percentage: %r", percentage)
+        return "F"
     for threshold, grade in GRADE_SCALE:
         if percentage >= threshold:
             return grade
     return "F"
 
 
-def compute_pass_fail(percentage, pass_mark: float = DEFAULT_PASS_MARK) -> str:
-    return "Pass" if float(percentage) >= pass_mark else "Fail"
+def get_pass_mark(conn=None) -> float:
+    """Reads the school-configured pass mark from Settings, falling back
+    to DEFAULT_PASS_MARK if it hasn't been configured yet or is invalid."""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_conn()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key='pass_mark'").fetchone()
+        if row and row["value"] not in (None, ""):
+            return float(row["value"])
+    except (TypeError, ValueError):
+        logger.warning("Configured pass_mark setting is not a valid number: %r", row["value"] if row else None)
+    finally:
+        if own_conn:
+            conn.close()
+    return DEFAULT_PASS_MARK
+
+
+def compute_pass_fail(percentage, pass_mark: float = None, conn=None) -> str:
+    """If pass_mark isn't explicitly passed, uses the school's configured
+    Pass Mark % setting (falling back to DEFAULT_PASS_MARK if unset)."""
+    try:
+        percentage = float(percentage)
+    except (TypeError, ValueError):
+        logger.warning("compute_pass_fail received a non-numeric percentage: %r", percentage)
+        return "Fail"
+
+    if pass_mark is None:
+        pass_mark = get_pass_mark(conn)
+
+    return "Pass" if percentage >= pass_mark else "Fail"
 
 
 def audit(session_user, module: str, action: str, description: str, conn=None):
@@ -26,23 +62,30 @@ def audit(session_user, module: str, action: str, description: str, conn=None):
         conn = get_conn()
 
     if session_user:
-        uid = session_user.get("uid", SYSTEM_USER_ID)
-        name = session_user.get("name", SYSTEM_USER_NAME)
-        role = session_user.get("role", "system")
+        uid = session_user.get("uid") or SYSTEM_USER_ID
+        name = session_user.get("name") or SYSTEM_USER_NAME
+        role = session_user.get("role") or "system"
     else:
         uid, name, role = SYSTEM_USER_ID, SYSTEM_USER_NAME, "system"
 
     now = datetime.datetime.now()
     log_id = f"alog_{now.strftime('%Y%m%d%H%M%S')}_{now.microsecond}_{secrets.token_hex(3)}"
-    conn.execute(
-        "INSERT INTO audit_log (id, user_id, user_name, role, module, action, date, time, description) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (log_id, uid, name, role,
-         module, action, now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), description),
-    )
-    if own_conn:
-        conn.commit()
-        conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO audit_log (id, user_id, user_name, role, module, action, date, time, description) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (log_id, uid, name, role,
+             module, action, now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), description),
+        )
+        if own_conn:
+            conn.commit()
+    except Exception:
+        # An audit-log write failing should never take down the request that
+        # triggered it, but it absolutely should be visible in server logs.
+        logger.exception("Failed to write audit log entry: module=%s action=%s", module, action)
+    finally:
+        if own_conn:
+            conn.close()
 
 
 def get_school(conn=None) -> dict:
@@ -70,5 +113,5 @@ def month_name(num) -> str:
               "August", "September", "October", "November", "December"]
     try:
         return months[int(num)]
-    except Exception:
+    except (TypeError, ValueError, IndexError):
         return str(num)

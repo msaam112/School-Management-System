@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.db import get_conn, now_iso, today
-from app.security import new_id, hash_password, random_password
+from app.security import new_id, hash_password, random_password, PasswordError
 from app.helpers import audit
 from app.deps import require_role
 from app.main import json_err
@@ -73,6 +73,11 @@ def create_teacher(body: TeacherCreate, session: dict = Depends(require_role("su
             return json_err("Employee ID already in use", 400)
 
         password = body.password or random_password()
+        try:
+            password_hash = hash_password(password)
+        except PasswordError as e:
+            return json_err(str(e), 400)
+
         is_ci = 1 if body.is_class_incharge else 0
         role = "class_incharge" if is_ci else "teacher"
 
@@ -80,7 +85,7 @@ def create_teacher(body: TeacherCreate, session: dict = Depends(require_role("su
         conn.execute(
             "INSERT INTO users (id, email, password_hash, role, status, display_name, created_at) "
             "VALUES (?,?,?,?,?,?,?)",
-            (uid, email, hash_password(password), role, "active", name, now_iso()))
+            (uid, email, password_hash, role, "active", name, now_iso()))
 
         tid = new_id("tch")
         conn.execute(
@@ -105,13 +110,30 @@ def update_teacher(tid: str, body: TeacherUpdate, session: dict = Depends(requir
         if not existing:
             return json_err("Teacher not found", 404)
 
+        if body.email is not None:
+            email = body.email.strip().lower()
+            if not EMAIL_RE.match(email):
+                return json_err("A valid email is required", 400)
+            dup = conn.execute("SELECT id FROM users WHERE email=? AND id!=?",
+                                (email, existing["user_id"])).fetchone()
+            if dup:
+                return json_err("Another user already uses this email", 400)
+            # Keep teachers.email and users.email in sync.
+            conn.execute("UPDATE users SET email=? WHERE id=?", (email, existing["user_id"]))
+
+        if body.employee_id is not None:
+            dup_emp = conn.execute("SELECT id FROM teachers WHERE employee_id=? AND id!=?",
+                                    (body.employee_id, tid)).fetchone()
+            if dup_emp:
+                return json_err("Employee ID already in use", 400)
+
         sets, params = [], []
         for f in ["name", "email", "phone", "qualification", "joining_date",
                   "employment_status", "employee_id"]:
             v = getattr(body, f)
             if v is not None:
                 sets.append(f"{f}=?")
-                params.append(v)
+                params.append(v.strip().lower() if f == "email" else v)
 
         # class_id is only meaningful when is_class_incharge is true — never store
         # a stray class assignment for a regular teacher, regardless of what was sent.
@@ -121,13 +143,12 @@ def update_teacher(tid: str, body: TeacherUpdate, session: dict = Depends(requir
             sets.append("class_id=?")
             params.append(body.class_id if body.is_class_incharge else None)
         elif body.class_id is not None:
-            # is_class_incharge wasn't part of this update — only allow class_id
-            # to be set if the teacher is already an incharge.
             current_ci = conn.execute(
                 "SELECT is_class_incharge FROM teachers WHERE id=?", (tid,)).fetchone()["is_class_incharge"]
             if current_ci:
                 sets.append("class_id=?")
                 params.append(body.class_id)
+
         if sets:
             conn.execute("UPDATE teachers SET " + ", ".join(sets) + " WHERE id=?", params + [tid])
 
@@ -150,6 +171,22 @@ def delete_teacher(tid: str, session: dict = Depends(require_role("super_admin")
         t = conn.execute("SELECT * FROM teachers WHERE id=?", (tid,)).fetchone()
         if not t:
             return json_err("Teacher not found", 404)
+
+        counts = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM teacher_attendance WHERE teacher_id=:tid) AS attendance,
+                (SELECT COUNT(*) FROM examinations WHERE created_by=(SELECT user_id FROM teachers WHERE id=:tid)) AS exams
+        """, {"tid": tid}).fetchone()
+
+        if counts["attendance"] or counts["exams"]:
+            parts = []
+            if counts["attendance"]: parts.append(f"{counts['attendance']} attendance record(s)")
+            if counts["exams"]: parts.append(f"{counts['exams']} exam(s) they created")
+            return json_err(
+                "Cannot delete this teacher — they have " + " and ".join(parts) +
+                ". Consider setting their employment status to 'inactive' instead.",
+                400
+            )
 
         conn.execute("DELETE FROM teacher_assignments WHERE teacher_id=?", (tid,))
         conn.execute("DELETE FROM teachers WHERE id=?", (tid,))

@@ -68,30 +68,51 @@ def submit_teacher_attendance(body: TeacherAttendanceSubmit,
                                session: dict = Depends(require_role(*SUBMIT_ROLES))):
     conn = get_conn()
     try:
-        d = body.date or today()
-
-        # BR-9 + BR-7 combined: once ANY record for this date is locked, nobody
-        # (Principal or Super Admin) may submit again until a Super Admin unlocks it.
-        already_locked = conn.execute(
-            "SELECT COUNT(*) c FROM teacher_attendance WHERE date=? AND locked=1", (d,)).fetchone()["c"]
-        if already_locked:
-            return json_err("Teacher attendance for this date is locked. Ask a Super Admin to unlock it first.", 400)
-
+        # Validate status values up front.
         for rec in body.records:
             if rec.status not in ATTENDANCE_STATUSES:
-                continue
-            conn.execute(
-                "INSERT INTO teacher_attendance (id, teacher_id, date, status, locked, submitted_at, submitted_by) "
-                "VALUES (?,?,?,?,?,?,?) "
-                "ON CONFLICT(teacher_id, date) DO UPDATE SET status=excluded.status, locked=excluded.locked, "
-                "submitted_at=excluded.submitted_at, submitted_by=excluded.submitted_by",
-                (new_id("tat"), rec.teacher_id, d, rec.status, 1 if body.submit else 0,
-                 now_iso() if body.submit else None, session.get("uid") if body.submit else None))
+                return json_err(f"Invalid attendance status: '{rec.status}'", 400)
 
-        audit(session, "Teacher Attendance", "Submit" if body.submit else "Draft",
-              f"{'Submitted' if body.submit else 'Saved draft'} teacher attendance for {d} by {session['role']}",
-              conn=conn)
-        conn.commit()
-        return {"message": "Teacher attendance saved", "locked": body.submit}
+        # Validate every submitted teacher actually exists.
+        if body.records:
+            teacher_ids = [rec.teacher_id for rec in body.records]
+            placeholders = ",".join("?" * len(teacher_ids))
+            valid_ids = {r["id"] for r in conn.execute(
+                f"SELECT id FROM teachers WHERE id IN ({placeholders})", teacher_ids).fetchall()}
+            invalid_ids = set(teacher_ids) - valid_ids
+            if invalid_ids:
+                return json_err(f"{len(invalid_ids)} teacher(s) in this submission could not be found.", 400)
+
+        d = body.date or today()
+
+        # BEGIN IMMEDIATE closes the same race window fixed in
+        # student_attendance.py: without it, Principal and Super Admin (or
+        # two rapid clicks) could both pass the "not locked" check before
+        # either commits.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            already_locked = conn.execute(
+                "SELECT COUNT(*) c FROM teacher_attendance WHERE date=? AND locked=1", (d,)).fetchone()["c"]
+            if already_locked:
+                conn.rollback()
+                return json_err("Teacher attendance for this date is locked. Ask a Super Admin to unlock it first.", 400)
+
+            for rec in body.records:
+                conn.execute(
+                    "INSERT INTO teacher_attendance (id, teacher_id, date, status, locked, submitted_at, submitted_by) "
+                    "VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(teacher_id, date) DO UPDATE SET status=excluded.status, locked=excluded.locked, "
+                    "submitted_at=excluded.submitted_at, submitted_by=excluded.submitted_by",
+                    (new_id("tat"), rec.teacher_id, d, rec.status, 1 if body.submit else 0,
+                     now_iso() if body.submit else None, session.get("uid") if body.submit else None))
+
+            audit(session, "Teacher Attendance", "Submit" if body.submit else "Draft",
+                  f"{'Submitted' if body.submit else 'Saved draft'} teacher attendance for {d} by {session['role']}",
+                  conn=conn)
+            conn.commit()
+            return {"message": "Teacher attendance saved", "locked": body.submit}
+        except Exception:
+            conn.rollback()
+            raise
     finally:
         conn.close()

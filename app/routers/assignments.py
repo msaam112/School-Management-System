@@ -39,13 +39,13 @@ def list_assignments(session: dict = Depends(require_role(*VIEW_ROLES))):
 def create_assignment(body: AssignmentCreate, session: dict = Depends(require_role("super_admin"))):
     conn = get_conn()
     try:
-        t = conn.execute("SELECT id FROM teachers WHERE id=?", (body.teacher_id,)).fetchone()
+        t = conn.execute("SELECT id, name FROM teachers WHERE id=?", (body.teacher_id,)).fetchone()
         if not t:
             return json_err("Teacher not found", 404)
-        c = conn.execute("SELECT id FROM classes WHERE id=?", (body.class_id,)).fetchone()
+        c = conn.execute("SELECT id, name FROM classes WHERE id=?", (body.class_id,)).fetchone()
         if not c:
             return json_err("Class not found", 404)
-        s = conn.execute("SELECT id FROM subjects WHERE id=?", (body.subject_id,)).fetchone()
+        s = conn.execute("SELECT id, name FROM subjects WHERE id=?", (body.subject_id,)).fetchone()
         if not s:
             return json_err("Subject not found", 404)
 
@@ -61,7 +61,7 @@ def create_assignment(body: AssignmentCreate, session: dict = Depends(require_ro
             (aid, body.teacher_id, body.class_id, body.subject_id))
 
         audit(session, "Assignments", "Create",
-              f"Assigned teacher {body.teacher_id} to class {body.class_id} subject {body.subject_id}",
+              f"Assigned {t['name']} to {c['name']} / {s['name']}",
               conn=conn)
         conn.commit()
         return {"id": aid}
@@ -73,13 +73,37 @@ def create_assignment(body: AssignmentCreate, session: dict = Depends(require_ro
 def delete_assignment(aid: str, session: dict = Depends(require_role("super_admin"))):
     conn = get_conn()
     try:
-        existing = conn.execute("SELECT * FROM teacher_assignments WHERE id=?", (aid,)).fetchone()
+        existing = conn.execute(
+            "SELECT ta.*, t.name teacher_name, c.name class_name, s.name subject_name "
+            "FROM teacher_assignments ta "
+            "JOIN teachers t ON ta.teacher_id=t.id "
+            "JOIN classes c ON ta.class_id=c.id "
+            "JOIN subjects s ON ta.subject_id=s.id "
+            "WHERE ta.id=?", (aid,)).fetchone()
         if not existing:
             return json_err("Assignment not found", 404)
 
+        # Check for existing exam results tied to this class/subject combo —
+        # removing the assignment doesn't delete them, but it's worth
+        # surfacing so the admin isn't surprised by orphaned-looking data.
+        results_count = conn.execute(
+            "SELECT COUNT(*) c FROM results WHERE subject_id=? AND student_id IN "
+            "(SELECT id FROM students WHERE class_id=?)",
+            (existing["subject_id"], existing["class_id"])).fetchone()["c"]
+
         conn.execute("DELETE FROM teacher_assignments WHERE id=?", (aid,))
-        audit(session, "Assignments", "Delete", f"Removed assignment {aid}", conn=conn)
+        audit(session, "Assignments", "Delete",
+              f"Removed {existing['teacher_name']} from {existing['class_name']} / {existing['subject_name']}",
+              conn=conn)
         conn.commit()
-        return {"message": "Assignment removed"}
+
+        response = {"message": "Assignment removed"}
+        if results_count:
+            response["warning"] = (
+                f"This class/subject already has {results_count} recorded exam result(s). "
+                "They remain in the system but won't be editable through the normal marks-entry "
+                "flow until a teacher is reassigned to this subject for this class."
+            )
+        return response
     finally:
         conn.close()

@@ -95,30 +95,69 @@ def submit_attendance(body: AttendanceSubmit, session: dict = Depends(require_ro
         if body.class_id != own_class:
             return json_err("You may only manage your assigned class", 403)
 
-        d = body.date or today()
+        if body.section_id:
+            sec = conn.execute("SELECT id FROM sections WHERE id=? AND class_id=?",
+                                (body.section_id, own_class)).fetchone()
+            if not sec:
+                return json_err("Selected section does not belong to your class", 400)
 
-        # BR-7: reject writes to already-locked records instead of silently overwriting.
-        already_locked = conn.execute(
-            "SELECT COUNT(*) c FROM student_attendance sa JOIN students s ON sa.student_id=s.id "
-            "WHERE sa.date=? AND sa.locked=1 AND s.class_id=?", (d, own_class)).fetchone()["c"]
-        if already_locked:
-            return json_err("Attendance for this date is locked. Ask a Super Admin to unlock it first.", 400)
-
+        # Validate every submitted status up front — reject the whole request
+        # on a bad value rather than silently dropping that student.
         for rec in body.records:
             if rec.status not in ATTENDANCE_STATUSES:
-                continue
-            conn.execute(
-                "INSERT INTO student_attendance (id, student_id, date, status, locked, submitted_at, submitted_by) "
-                "VALUES (?,?,?,?,?,?,?) "
-                "ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, locked=excluded.locked, "
-                "submitted_at=excluded.submitted_at, submitted_by=excluded.submitted_by",
-                (new_id("att"), rec.student_id, d, rec.status, 1 if body.submit else 0,
-                 now_iso() if body.submit else None, session.get("uid") if body.submit else None))
+                return json_err(f"Invalid attendance status: '{rec.status}'", 400)
 
-        audit(session, "Attendance", "Submit" if body.submit else "Draft",
-              f"{'Submitted' if body.submit else 'Saved draft'} student attendance for {d}, class {own_class}",
-              conn=conn)
-        conn.commit()
-        return {"message": "Attendance saved", "locked": body.submit}
+        # Validate every submitted student actually belongs to this class
+        # (and section, if one was specified) — closes the gap where a
+        # crafted request could mark attendance for students outside the
+        # Class Incharge's own class.
+        if body.records:
+            student_ids = [rec.student_id for rec in body.records]
+            placeholders = ",".join("?" * len(student_ids))
+            sql = f"SELECT id FROM students WHERE id IN ({placeholders}) AND class_id=?"
+            params = student_ids + [own_class]
+            if body.section_id:
+                sql += " AND section_id=?"
+                params.append(body.section_id)
+            valid_ids = {r["id"] for r in conn.execute(sql, params).fetchall()}
+            invalid_ids = set(student_ids) - valid_ids
+            if invalid_ids:
+                return json_err(
+                    f"{len(invalid_ids)} student(s) in this submission do not belong to your class/section.",
+                    400
+                )
+
+        d = body.date or today()
+
+        # BEGIN IMMEDIATE closes the same race-condition class we fixed in
+        # classes.py: without it, two near-simultaneous submit requests for
+        # the same class/date could both pass the "not locked" check before
+        # either commits, silently overwriting one submission with another.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            already_locked = conn.execute(
+                "SELECT COUNT(*) c FROM student_attendance sa JOIN students s ON sa.student_id=s.id "
+                "WHERE sa.date=? AND sa.locked=1 AND s.class_id=?", (d, own_class)).fetchone()["c"]
+            if already_locked:
+                conn.rollback()
+                return json_err("Attendance for this date is locked. Ask a Super Admin to unlock it first.", 400)
+
+            for rec in body.records:
+                conn.execute(
+                    "INSERT INTO student_attendance (id, student_id, date, status, locked, submitted_at, submitted_by) "
+                    "VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(student_id, date) DO UPDATE SET status=excluded.status, locked=excluded.locked, "
+                    "submitted_at=excluded.submitted_at, submitted_by=excluded.submitted_by",
+                    (new_id("att"), rec.student_id, d, rec.status, 1 if body.submit else 0,
+                     now_iso() if body.submit else None, session.get("uid") if body.submit else None))
+
+            audit(session, "Attendance", "Submit" if body.submit else "Draft",
+                  f"{'Submitted' if body.submit else 'Saved draft'} student attendance for {d}, class {own_class}",
+                  conn=conn)
+            conn.commit()
+            return {"message": "Attendance saved", "locked": body.submit}
+        except Exception:
+            conn.rollback()
+            raise
     finally:
         conn.close()

@@ -14,21 +14,30 @@
     <div class="boot-dots"><span></span><span></span><span></span></div>
   </div>
 
-  <!-- ============ AUTH (login / setup) ============ -->
+ <!-- ============ AUTH (login / setup) ============ -->
   <div id="auth-screen" class="auth-screen">
-    <div class="auth-bg"></div>
-    <div class="orb-field"><span></span><span></span><span></span></div>
-    <div class="auth-card" id="auth-card">
-      <!-- content injected by app.js -->
+    <div class="auth-hero">
+      <div class="auth-hero-content">
+        <h1>School<br>Management <span class="accent">Made&nbsp;Simple</span></h1>
+        <p>Attendance, examinations, fees, and reporting — all in one secure, role-based platform built for your school.</p>
+        <ul class="auth-hero-list">
+          <li><span class="tick">✓</span> Real-time attendance &amp; results tracking</li>
+          <li><span class="tick">✓</span> Automated fee challans &amp; collection</li>
+          <li><span class="tick">✓</span> Secure, role-based access for every user</li>
+        </ul>
+      </div>
     </div>
-    <div class="auth-footer">School Management System · Secure · Role-Based</div>
+    <div class="auth-card-wrap">
+      <div class="auth-card" id="auth-card">
+        <!-- content injected by app.js -->
+      </div>
+    </div>
   </div>
-
   <!-- ============ MAIN APP ============ -->
   <div id="main-screen" class="app-shell" hidden>
     <aside class="sidebar" id="sidebar">
       <div class="brand">
-        <div class="brand-logo">SMS</div>
+        <div class="brand-logo" id="brand-logo-el">SMS</div>
         <div class="brand-text"><b id="brand-name">School</b><span id="brand-role">Role</span></div>
       </div>
       <nav class="nav" id="nav"></nav>
@@ -73,5 +82,6 @@
   <script src="/static/js/backup.js"></script>
   <script src="/static/js/settings.js"></script>
   <script src="/static/js/parent_portal.js"></script>
+  <script src="/static/js/principals.js"></script>
 </body>
 </html>

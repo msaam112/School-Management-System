@@ -8,10 +8,18 @@ from app.security import hash_password, random_password
 
 
 def get_conn():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 10000")
+    # WAL mode lets reads proceed while a write is in progress, which
+    # matters a lot once multiple users are hitting the app at once
+    # (attendance submission, fee updates, report generation, etc.).
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -55,6 +63,21 @@ CREATE TABLE IF NOT EXISTS teachers (
     employment_status TEXT DEFAULT 'active',
     is_class_incharge INTEGER DEFAULT 0,
     class_id TEXT REFERENCES classes(id),
+    user_id TEXT NOT NULL REFERENCES users(id)
+);
+
+-- Principal profile data — deliberately a separate table from `teachers`
+-- so Principal management can be its own dedicated flow, not a variant
+-- of Teacher management.
+CREATE TABLE IF NOT EXISTS principals (
+    id TEXT PRIMARY KEY,
+    employee_id TEXT UNIQUE,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    phone TEXT,
+    qualification TEXT,
+    joining_date TEXT,
+    employment_status TEXT DEFAULT 'active',
     user_id TEXT NOT NULL REFERENCES users(id)
 );
 
@@ -174,7 +197,9 @@ CREATE TABLE IF NOT EXISTS fee_challans (
     issue_date TEXT NOT NULL,
     due_date TEXT NOT NULL,
     total REAL DEFAULT 0,
+    amount_paid REAL DEFAULT 0,
     status TEXT DEFAULT 'Unpaid' CHECK (status IN ('Paid','Unpaid','Partially Paid')),
+    paid_at TEXT,
     UNIQUE(student_id, month, year)
 );
 
@@ -213,6 +238,14 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Indexes for columns that get filtered on frequently but weren't already
+-- covered by a UNIQUE constraint's implicit index.
+CREATE INDEX IF NOT EXISTS idx_audit_log_date ON audit_log(date);
+CREATE INDEX IF NOT EXISTS idx_audit_log_module ON audit_log(module);
+CREATE INDEX IF NOT EXISTS idx_students_class ON students(class_id);
+CREATE INDEX IF NOT EXISTS idx_fee_challans_status ON fee_challans(status);
+CREATE INDEX IF NOT EXISTS idx_results_exam ON results(exam_id);
 """
 
 

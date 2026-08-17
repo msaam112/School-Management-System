@@ -51,7 +51,7 @@ def create_class(body: ClassCreate, session: dict = Depends(require_role("super_
 
     conn = get_conn()
     try:
-        existing = conn.execute("SELECT id FROM classes WHERE name=?", (name,)).fetchone()
+        existing = conn.execute("SELECT id FROM classes WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
         if existing:
             return json_err("A class with this name already exists", 400)
 
@@ -71,9 +71,18 @@ def update_class(cid: str, body: ClassUpdate, session: dict = Depends(require_ro
         existing = conn.execute("SELECT * FROM classes WHERE id=?", (cid,)).fetchone()
         if not existing:
             return json_err("Class not found", 404)
-        if body.name:
-            conn.execute("UPDATE classes SET name=? WHERE id=?", (body.name.strip(), cid))
-            audit(session, "Classes", "Update", f"Renamed class {cid}", conn=conn)
+
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                return json_err("Class name cannot be empty", 400)
+            dup = conn.execute("SELECT id FROM classes WHERE LOWER(name)=LOWER(?) AND id!=?",
+                                (name, cid)).fetchone()
+            if dup:
+                return json_err("Another class already uses this name", 400)
+
+            conn.execute("UPDATE classes SET name=? WHERE id=?", (name, cid))
+            audit(session, "Classes", "Update", f"Renamed class '{existing['name']}' to '{name}'", conn=conn)
             conn.commit()
         return {"message": "Class updated"}
     finally:
@@ -102,7 +111,7 @@ def delete_class(cid: str, session: dict = Depends(require_role("super_admin")))
 
         conn.execute("DELETE FROM sections WHERE class_id=?", (cid,))
         conn.execute("DELETE FROM classes WHERE id=?", (cid,))
-        audit(session, "Classes", "Delete", f"Removed class {cid}", conn=conn)
+        audit(session, "Classes", "Delete", f"Removed class '{existing['name']}'", conn=conn)
         conn.commit()
         return {"message": "Class removed"}
     finally:
@@ -133,26 +142,37 @@ def create_section(body: SectionCreate, session: dict = Depends(require_role("su
 
     conn = get_conn()
     try:
-        cls = conn.execute("SELECT id FROM classes WHERE id=?", (body.class_id,)).fetchone()
+        cls = conn.execute("SELECT id, name FROM classes WHERE id=?", (body.class_id,)).fetchone()
         if not cls:
             return json_err("Class not found", 404)
 
-        count = conn.execute(
-            "SELECT COUNT(*) c FROM sections WHERE class_id=?", (body.class_id,)).fetchone()["c"]
-        if count >= MAX_SECTIONS_PER_CLASS:
-            return json_err(f"Maximum {MAX_SECTIONS_PER_CLASS} sections per class allowed", 400)
-
         dup = conn.execute(
-            "SELECT id FROM sections WHERE class_id=? AND name=?", (body.class_id, name)).fetchone()
+            "SELECT id FROM sections WHERE class_id=? AND LOWER(name)=LOWER(?)",
+            (body.class_id, name)).fetchone()
         if dup:
             return json_err("This section already exists for this class", 400)
 
-        sid = new_id("sec")
-        conn.execute("INSERT INTO sections (id, name, class_id) VALUES (?,?,?)",
-                     (sid, name, body.class_id))
-        audit(session, "Sections", "Create", f"Added section {name}", conn=conn)
-        conn.commit()
-        return {"id": sid}
+        # BEGIN IMMEDIATE takes a write lock right away, so a concurrent
+        # request can't read the same "count" before this transaction
+        # commits — closing the race condition that could otherwise let a
+        # class exceed MAX_SECTIONS_PER_CLASS under simultaneous requests.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) c FROM sections WHERE class_id=?", (body.class_id,)).fetchone()["c"]
+            if count >= MAX_SECTIONS_PER_CLASS:
+                conn.rollback()
+                return json_err(f"Maximum {MAX_SECTIONS_PER_CLASS} sections per class allowed", 400)
+
+            sid = new_id("sec")
+            conn.execute("INSERT INTO sections (id, name, class_id) VALUES (?,?,?)",
+                         (sid, name, body.class_id))
+            audit(session, "Sections", "Create", f"Added section '{name}' to class '{cls['name']}'", conn=conn)
+            conn.commit()
+            return {"id": sid}
+        except Exception:
+            conn.rollback()
+            raise
     finally:
         conn.close()
 
@@ -161,7 +181,9 @@ def create_section(body: SectionCreate, session: dict = Depends(require_role("su
 def delete_section(sid: str, session: dict = Depends(require_role("super_admin"))):
     conn = get_conn()
     try:
-        existing = conn.execute("SELECT * FROM sections WHERE id=?", (sid,)).fetchone()
+        existing = conn.execute(
+            "SELECT s.*, c.name class_name FROM sections s JOIN classes c ON s.class_id=c.id WHERE s.id=?",
+            (sid,)).fetchone()
         if not existing:
             return json_err("Section not found", 404)
 
@@ -170,7 +192,7 @@ def delete_section(sid: str, session: dict = Depends(require_role("super_admin")
             return json_err("Cannot delete a section with enrolled students", 400)
 
         conn.execute("DELETE FROM sections WHERE id=?", (sid,))
-        audit(session, "Sections", "Delete", f"Removed section {sid}", conn=conn)
+        audit(session, "Sections", "Delete", f"Removed section '{existing['name']}' from class '{existing['class_name']}'", conn=conn)
         conn.commit()
         return {"message": "Section removed"}
     finally:

@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import List, Optional
+import logging
 
 from app.db import get_conn
 from app.security import new_id
@@ -9,6 +10,8 @@ from app.helpers import audit, compute_grade, compute_pass_fail
 from app.ai import generate_result_remark
 from app.deps import require_role
 from app.main import json_err
+
+logger = logging.getLogger("sms.examinations")
 
 router = APIRouter(prefix="/api", tags=["examinations"])
 
@@ -106,7 +109,7 @@ def delete_exam(eid: str, session: dict = Depends(require_role("super_admin", "p
 
         conn.execute("DELETE FROM results WHERE exam_id=?", (eid,))
         conn.execute("DELETE FROM examinations WHERE id=?", (eid,))
-        audit(session, "Exams", "Delete", f"Removed exam {eid} and its results", conn=conn)
+        audit(session, "Exams", "Delete", f"Removed exam '{existing['name']}' and its results", conn=conn)
         conn.commit()
         return {"message": "Exam removed"}
     finally:
@@ -126,13 +129,41 @@ def enter_marks(eid: str, body: MarksSubmit, session: dict = Depends(require_rol
         if not subject:
             return json_err("Subject not found", 404)
 
+        if not body.marks:
+            return json_err("At least one mark entry is required", 400)
+
+        # Validate every entry up front, before writing anything — reject the
+        # whole submission on bad data instead of silently skipping/corrupting.
         for m in body.marks:
             total = m.total or 100
             if total <= 0:
-                continue
+                return json_err(f"Total marks must be greater than zero (student {m.student_id})", 400)
+            if m.obtained < 0:
+                return json_err(f"Obtained marks cannot be negative (student {m.student_id})", 400)
+            if m.obtained > total:
+                return json_err(
+                    f"Obtained marks ({m.obtained}) cannot exceed total marks ({total}) for student {m.student_id}",
+                    400
+                )
+
+        # Validate every submitted student actually belongs to this exam's class/section.
+        student_ids = [m.student_id for m in body.marks]
+        placeholders = ",".join("?" * len(student_ids))
+        sql = f"SELECT id FROM students WHERE id IN ({placeholders}) AND class_id=?"
+        params = student_ids + [exam["class_id"]]
+        if exam["section_id"]:
+            sql += " AND section_id=?"
+            params.append(exam["section_id"])
+        valid_ids = {r["id"] for r in conn.execute(sql, params).fetchall()}
+        invalid_ids = set(student_ids) - valid_ids
+        if invalid_ids:
+            return json_err(f"{len(invalid_ids)} student(s) in this submission are not in this exam's class.", 400)
+
+        for m in body.marks:
+            total = m.total or 100
             pct = (m.obtained / total) * 100
             grade = compute_grade(pct)
-            pf = compute_pass_fail(pct)
+            pf = compute_pass_fail(pct, conn=conn)  # reads the school's configured pass mark
             conn.execute(
                 "INSERT INTO results (id, student_id, exam_id, subject_id, obtained, total, "
                 "percentage, grade, pass_fail) VALUES (?,?,?,?,?,?,?,?,?) "
@@ -143,7 +174,7 @@ def enter_marks(eid: str, body: MarksSubmit, session: dict = Depends(require_rol
                  round(pct, 2), grade, pf))
 
         audit(session, "Results", "Enter Marks",
-              f"Entered marks for exam {eid} subject {body.subject_id}", conn=conn)
+              f"Entered marks for exam '{exam['name']}' subject {body.subject_id}", conn=conn)
         conn.commit()
         return {"message": "Marks saved"}
     finally:
@@ -214,8 +245,9 @@ def get_result_remark(student_id: str, exam_id: str,
 
         try:
             remark = generate_result_remark(student["name"], exam["name"], subject_rows, pct, overall_result)
-        except Exception as e:
-            return json_err(f"AI remark generation failed: {e}", 502)
+        except Exception:
+            logger.exception("AI remark generation failed for student=%s exam=%s", student_id, exam_id)
+            return json_err("Could not generate a remark right now. Please try again shortly.", 502)
 
         return {"remark": remark}
     finally:

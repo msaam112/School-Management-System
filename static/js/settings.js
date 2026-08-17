@@ -21,7 +21,7 @@ PAGES.settings = { title:'System Settings', async render(){
   const settings = d.settings || {};
   const users = usersResp.users || [];
   state.school = s;
-  refreshBrand();
+  await refreshBrand();
 
   content.innerHTML = `
     <div class="page-head"><div><h2>System Settings</h2><p>School profile and general configuration (Super Admin only)</p></div></div>
@@ -33,7 +33,16 @@ PAGES.settings = { title:'System Settings', async render(){
         ${textareaField('address','Address', s.address||'')}
         <div class="row2">${field('principal_name','Principal Name', s.principal_name||'')+field('established_year','Established Year', s.established_year||'')}</div>
         ${textareaField('motto','Motto', s.motto||'')}
-        <div class="divider"></div><b>General</b>
+      <div class="divider"></div>
+      <b>School Logo</b>
+      <div class="toolbar" style="margin-top:10px;align-items:center">
+        <div style="width:56px;height:56px;border-radius:12px;overflow:hidden;background:var(--surface-2);display:flex;align-items:center;justify-content:center;border:1px solid var(--border)" id="logo-preview">
+          ${s.logo ? `<img src="${esc(s.logo)}" style="width:100%;height:100%;object-fit:cover">` : `<span class="muted" style="font-size:10px">No logo</span>`}
+        </div>
+        <input type="file" id="logo-file" accept="image/*" style="max-width:220px">
+        <button type="button" class="btn btn-ghost btn-sm" id="logo-upload-btn">Upload Logo</button>
+      </div>
+      <div class="divider"></div><b>General</b>
         <div class="row2" style="margin-top:8px">
           ${field('academic_year','Current Academic Year', settings.academic_year||'')}
           ${field('pass_mark','Pass Mark %', settings.pass_mark||'33', 'number')}
@@ -98,26 +107,85 @@ PAGES.settings = { title:'System Settings', async render(){
     bindUserActions(content, filtered);
   }, 200));
 
+  const logoBtn = document.getElementById('logo-upload-btn');
+  if(logoBtn) logoBtn.addEventListener('click', async ()=>{
+    const fileInput = document.getElementById('logo-file');
+    const file = fileInput.files[0];
+    if(!file){ toast('Choose a file', 'Select an image first', 'error'); return; }
+    logoBtn.disabled = true;
+    try{
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch('/api/settings/logo', { method:'POST', credentials:'same-origin', body: fd });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        throw new Error(d.error || 'Upload failed');
+      }
+      const result = await r.json();
+      state.school = state.school || {};
+      state.school.logo = result.logo;
+      await refreshBrand();
+      document.getElementById('logo-preview').innerHTML = `<img src="${esc(result.logo)}" style="width:100%;height:100%;object-fit:cover">`;
+      toast('Uploaded', 'School logo updated', 'success');
+    }catch(err){
+      toast('Upload failed', err.message, 'error');
+    }finally{
+      logoBtn.disabled = false;
+    }
+  });
+
   bindUserActions(content, users);
 }};
+
+const REASSIGNABLE_ROLES = [
+  {value:'super_admin',label:'Super Admin'}, {value:'principal',label:'Principal'},
+  {value:'teacher',label:'Teacher'}, {value:'class_incharge',label:'Class Incharge'},
+];
 
 function userColumns(){
   return [
     {k:'display_name', l:'Name'}, {k:'email', l:'Email'},
-    {k:'role', l:'Role', fmt:r=>badge((r.role||'').replace('_',' '),'violet')},
+    {k:'role', l:'Role', fmt:r=>`
+      <select class="input" data-role-select="${r.id}" style="max-width:150px;padding:6px 10px;font-size:12px">
+        ${REASSIGNABLE_ROLES.map(x=>`<option value="${x.value}" ${x.value===r.role?'selected':''}>${x.label}</option>`).join('')}
+      </select>`},
     {k:'status', l:'Status', fmt:r=>statusBadge(r.status)},
     {k:'_a', l:'', nowrap:true, fmt:r=>`
-      ${r.role!=='super_admin' ? `
-        <button class="btn btn-ghost btn-sm" data-reset="${r.id}">Reset Password</button>
-        ${r.status==='active'
-          ? `<button class="btn btn-danger btn-sm" data-disable="${r.id}">Disable</button>`
-          : `<button class="btn btn-success btn-sm" data-enable="${r.id}">Enable</button>`}
-      ` : `<span class="muted">—</span>`}
+      <button class="btn btn-ghost btn-sm" data-setpw="${r.id}">Set Password</button>
+      <button class="btn btn-ghost btn-sm" data-reset="${r.id}">Random Reset</button>
+      ${r.status==='active'
+        ? `<button class="btn btn-danger btn-sm" data-disable="${r.id}">Disable</button>`
+        : `<button class="btn btn-success btn-sm" data-enable="${r.id}">Enable</button>`}
     `},
   ];
 }
-
 function bindUserActions(content, users){
+  content.querySelectorAll('[data-role-select]').forEach(sel=>{
+    sel.addEventListener('change', ()=>{
+      const u = users.find(x=>x.id===sel.dataset.roleSelect);
+      const newRole = sel.value;
+      confirmDialog('Change role', `Change ${u?u.display_name:'this user'}'s role to "${newRole.replace('_',' ')}"?`, async()=>{
+        const result = await api('/api/settings/users/'+sel.dataset.roleSelect+'/role', 'PUT', {role: newRole});
+        if(result.warning) toast('Role changed (note)', result.warning, 'error');
+        PAGES.settings.render();
+      });
+    });
+  });
+
+  content.querySelectorAll('[data-setpw]').forEach(b=>b.addEventListener('click', ()=>{
+    const u = users.find(x=>x.id===b.dataset.setpw);
+    openModal({
+      title: 'Set Custom Password',
+      body: `<p class="hint" style="margin-bottom:14px">Set a specific password for <b>${esc(u?u.display_name:'')}</b> (min 8 characters).</p>${field('password','New Password','', 'password')}`,
+      onSave: async(scope)=>{
+        const v = getVals(scope);
+        if(!v.password || v.password.length < 8) throw new Error('Password must be at least 8 characters');
+        await api('/api/settings/users/'+b.dataset.setpw+'/set-password', 'POST', {password: v.password});
+        toast('Password set', `${u?u.display_name:'User'}'s password has been updated`, 'success');
+      }
+    });
+  }));
+
   content.querySelectorAll('[data-reset]').forEach(b=>b.addEventListener('click', async ()=>{
     const u = users.find(x=>x.id===b.dataset.reset);
     b.disabled = true;

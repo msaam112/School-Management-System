@@ -26,6 +26,7 @@ const NAV_ICONS = {
   myatt: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16"/><path d="m9 14 2 2 4-4"/>',
   myresults: '<path d="M9 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/>',
   myfees: '<path d="M6 2h12v20l-3-2-3 2-3-2-3 2Z"/><path d="M9 8h6M9 12h6"/>',
+  principals: '<path d="M12 2 3 7v2h18V7Z"/><path d="M5 10v9h14v-9"/><path d="M9 22v-6h6v6"/>',
 };
 
 /* Deterministic color per icon — same nav item is always the same color,
@@ -37,6 +38,7 @@ const NAV_ICON_COLORS = {
   feestruct:'teal', challans:'pink', reports:'indigo', audit:'red',
   backup:'orange', settings:'blue',
   mychild:'green', myatt:'purple', myresults:'teal', myfees:'pink',
+  principals:'purple',
 };
 
 function navIcon(key){
@@ -53,6 +55,7 @@ const NAVCFG = {
     {k:'students',l:'Students', icon:'students'},
     {k:'parents',l:'Parents', icon:'parents'},
     {k:'teachers',l:'Teachers', icon:'teachers'},
+    {k:'principals',l:'Headmasters', icon:'principals'},
     {k:'classes',l:'Classes', icon:'classes'},
     {k:'sections',l:'Sections', icon:'sections'},
     {k:'subjects',l:'Subjects', icon:'subjects'},
@@ -71,9 +74,9 @@ const NAVCFG = {
     {k:'backup',l:'Database Backup', icon:'backup'},
     {k:'settings',l:'System Settings', icon:'settings'}
   ],
-  principal:[
+ principal:[
     {k:'dashboard',l:'Dashboard', icon:'dashboard'},
-    {sep:'OVERVIEW'},
+    {sep:'OVERSIGHT'},
     {k:'students',l:'Students', icon:'students'},
     {k:'teachers',l:'Teachers', icon:'teachers'},
     {k:'classes',l:'Classes', icon:'classes'},
